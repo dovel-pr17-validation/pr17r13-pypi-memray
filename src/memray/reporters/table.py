@@ -1,0 +1,96 @@
+import html
+from typing import Any
+from typing import Dict
+from typing import Iterable
+from typing import List
+from typing import TextIO
+from typing import Tuple
+
+from memray import AllocationRecord
+from memray import AllocatorType
+from memray import MemorySnapshot
+from memray import Metadata
+from memray.reporters.common import format_thread_name
+from memray.reporters.templates import render_report
+
+
+class TableReporter:
+    def __init__(
+        self,
+        data: List[Dict[str, Any]],
+        *,
+        memory_records: Iterable[MemorySnapshot],
+    ):
+        super().__init__()
+        self.data = data
+        self.memory_records = memory_records
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        allocations: Iterable[AllocationRecord],
+        *,
+        memory_records: Iterable[MemorySnapshot],
+        native_traces: bool,
+        merge_threads: bool = True,
+        **kwargs: Any,
+    ) -> "TableReporter":
+        # Aggregate records that share the same displayed fields, since the
+        # table only shows the top stack frame and records with different full
+        # call stacks can map to the same displayed row.
+        aggregated: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        for record in allocations:
+            stack_trace = (
+                list(record.hybrid_stack_trace(max_stacks=1))
+                if native_traces
+                else record.stack_trace(max_stacks=1)
+            )
+            stack = "???"
+            if stack_trace:
+                function, file, line = stack_trace[0]
+                stack = f"{function} at {file}:{line}"
+
+            allocator = AllocatorType(record.allocator)
+            tid = format_thread_name(record)
+            # Note: When threads are merged the thread ID column must be left
+            # out of the key, because the C++ aggregation currently leaves in
+            # place the TID of one of the merged allocations.
+            key = ("" if merge_threads else tid, allocator.name.lower(), stack)
+            if key in aggregated:
+                aggregated[key]["size"] += record.size
+                aggregated[key]["n_allocations"] += record.n_allocations
+            else:
+                aggregated[key] = {
+                    "tid": tid,
+                    "size": record.size,
+                    "allocator": allocator.name.lower(),
+                    "n_allocations": record.n_allocations,
+                    "stack_trace": html.escape(stack),
+                }
+
+        return cls(list(aggregated.values()), memory_records=memory_records)
+
+    def render(
+        self,
+        outfile: TextIO,
+        metadata: Metadata,
+        show_memory_leaks: bool,
+        merge_threads: bool,
+        inverted: bool,
+        no_web: bool = False,
+    ) -> None:
+        if inverted:
+            raise NotImplementedError(
+                "TableReporter does not support inverted argument"
+            )
+        html_code = render_report(
+            kind="table",
+            data=self.data,
+            metadata=metadata,
+            memory_records=self.memory_records,
+            show_memory_leaks=show_memory_leaks,
+            merge_threads=merge_threads,
+            inverted=inverted,
+            no_web=no_web,
+        )
+        print(html_code, file=outfile)

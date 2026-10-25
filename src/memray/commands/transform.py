@@ -1,0 +1,71 @@
+import argparse
+import importlib.util
+import shutil
+import sys
+
+from memray._errors import MemrayCommandError
+
+from ..reporters.transform import TransformReporter
+from ._parse_args import TRANSFORM_SUFFIX_MAP
+from .common import HighWatermarkCommand
+
+
+class TransformCommand(HighWatermarkCommand):
+    def __init__(self) -> None:
+        super().__init__(
+            reporter_factory=lambda *args, **kwargs: TransformReporter(
+                *args, **kwargs, format=self.reporter_name
+            ),
+            reporter_name="transform",
+        )
+
+    def run(self, args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+        the_format = args.format.lower()
+        suffix = TRANSFORM_SUFFIX_MAP.get(the_format)
+        if not suffix:
+            raise MemrayCommandError(
+                f"Format not supported: {args.format}", exit_code=1
+            )
+
+        # The csv format exists to be machine-parsed, and it has dedicated tid
+        # and thread_name columns, so we keep each thread's allocations on their
+        # own row instead of merging them across threads. Every other format is
+        # meant for human consumption and always merges threads.
+        args.split_threads = the_format == "csv"
+
+        self.suffix = suffix
+        self.reporter_name = the_format
+        super().run(args, parser)
+
+        post_run_callable = getattr(self, f"post_run_{the_format}", None)
+        if post_run_callable:
+            post_run_callable()
+
+    def post_run_gprof2dot(self) -> None:
+        from rich import print as pprint
+
+        assert self.output_file is not None
+        command = ""
+        if shutil.which("gprof2dot") is not None:
+            command = "gprof2dot"
+        elif importlib.util.find_spec("gprof2dot") is not None:
+            command = f"{sys.executable} -m gprof2dot"
+        else:
+            pprint(
+                ":exclamation: [red]gprof2dot doesn't seem to be installed. "
+                "Please install it to be able to process the transform.[/red]"
+                "\n:point_right: Check out https://github.com/jrfonseca/gprof2dot for "
+                "installation instructions"
+            )
+
+        if not shutil.which("dot"):
+            pprint(
+                ":exclamation: [red]Graphviz doesn't seem to be installed. "
+                "Please install it to be able to process the transform.[/red]"
+                "\n:point_right: Check out https://graphviz.org/download/ for "
+                "installation instructions"
+            )
+
+        print()
+        print("To generate a graph from the transform file, run for example:")
+        print(f"{command} -f json {self.output_file} | dot -Tpng -o output.png")

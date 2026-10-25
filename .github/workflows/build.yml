@@ -1,0 +1,128 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  check_generated_files:
+    name: "Check if generated files are up to date"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -qy npm git
+      - name: Check if files are up to date
+        run: make build-js
+      - name: Check for changes
+        run: |
+          git add -u
+          changes=$(git status --porcelain)
+          # Check for changes in regenerated files
+          if test -n "$changes"; then
+            echo "Generated files not up to date."
+            echo "$changes"
+            echo ""
+            git diff --staged || true
+            exit 1
+          fi
+
+  test_in_alpine:
+    name: "Test in Alpine Linux"
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest # zizmor: ignore[unpinned-images]
+      options: --cap-add=SYS_PTRACE
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up dependencies
+        run: |
+          apk add --update build-base libunwind-dev lz4-dev musl-dev python3-dev python3-dbg gdb lldb elfutils-dev libdebuginfod
+      - name: Create virtual environment
+        run: |
+          python3 -m venv /venv
+      - name: Install Python dependencies
+        run: |
+          /venv/bin/python -m pip install --upgrade pip
+      - name: Run tests
+        env:
+          PYTHON: /venv/bin/python
+        run: |
+          make test-install check-python
+
+  lint_and_docs:
+    name: "Lint and Docs"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 16
+      - name: Symlink node as nodejs
+        run: ln -sf "$(which node)" "$(which node)js"
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+      - name: Set up dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -qy clang-format npm libdebuginfod-dev libunwind-dev liblz4-dev pkg-config
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --group extra
+      - name: Install Package
+        run: |
+          python3 -m pip install -e .
+      - name: Lint sources
+        run: |
+          make lint
+      - name: Build docs
+        run: |
+          towncrier build --version 99.99 --name memray --keep
+          make docs
+
+  valgrind:
+    name: "Valgrind & Helgrind"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+      - name: Set up dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -qy libdebuginfod-dev libunwind-dev liblz4-dev pkg-config npm valgrind
+      - name: Install Python dependencies and package
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --group test
+          python3 -m pip install -e .
+      - name: Run Valgrind
+        run: make valgrind
+      - name: Run Helgrind
+        run: make helgrind
